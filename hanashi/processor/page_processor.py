@@ -406,7 +406,8 @@ def process(filename):
 def extract_text(masks):
     result = []
     for mask in masks:
-        s = (pytesseract.image_to_string(mask[2])).strip()
+        image = mask[2].resize([int(n*2.5) for n in mask[2].size], Image.ANTIALIAS)
+        s = (pytesseract.image_to_string(image)).strip()
         if s != "":
             result.append((s, mask))
 
