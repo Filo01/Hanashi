@@ -6,7 +6,6 @@ import cv2
 import logging
 import pytesseract
 import math
-import cProfile, pstats
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -323,7 +322,7 @@ def mask_groups(img, groups):
                                       bounding_box.x + bounding_box.width,
                                       bounding_box.y + bounding_box.height))
 
-            masks.append((bounding_box.x, bounding_box.y, temp_img, groups[label]))
+            masks.append((bounding_box.x, bounding_box.y, temp_img, bounding_box))
 
     return masks
 
@@ -347,7 +346,7 @@ def mask_img(img, masks):
     return line_masks
 
 
-def compare_image(filename, masks):
+def compare_with_original(filename, masks):
     original = Image.open(filename)
     #original = original.resize([int(2 * s) for s in original.size], Image.ANTIALIAS)
     img3 = Image.new("RGB", (original.size[0] * 2, original.size[1]))
@@ -356,6 +355,31 @@ def compare_image(filename, masks):
         img3.paste(mask[2], box=(mask[0], mask[1]))
     #img3 = img3.resize([int(0.5 * s) for s in img3.size], Image.ANTIALIAS)
     return img3
+
+
+def apply_masks(original, masks):
+
+    masked = np.zeros(original.shape, dtype=np.uint8)
+    for mask in masks:
+        cv2.rectangle(masked,
+                      (mask[3].l_top.x, mask[3].l_top.y),
+                      (mask[3].r_bot.x, mask[3].r_bot.y),
+                      255, thickness=cv2.FILLED)
+    fg_masked = cv2.bitwise_or(original, original, mask=masked)
+    masked = cv2.bitwise_not(masked)
+    bk = np.full(original.shape, 255, dtype=np.uint8)
+    bk_masked = cv2.bitwise_and(bk, bk, mask=masked)
+    final = cv2.bitwise_or(fg_masked, bk_masked)
+
+    return final
+
+
+def compare_image(img1, img2):
+    img3 = cv2.subtract(img1, img2)
+    img1 = cv2.bitwise_not(img1)
+    total = cv2.countNonZero(img1)
+    non_zero = cv2.countNonZero(img3)
+    return float(non_zero)/total*100
 
 
 def process(filename):

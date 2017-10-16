@@ -6,3 +6,4 @@ requests
 beautifulsoup4
 pytesseract
 begins
+memory_profiler
