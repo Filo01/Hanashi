@@ -20,16 +20,16 @@ print("\n----\n".join(blocks_of_text))
 ## Prerequisites
 
 ```
-sudo apt-get update
-sudo apt-get install tesseract-ocr
+$ sudo apt-get update
+$ sudo apt-get install tesseract-ocr
 ```
 
-### Installing
+## Installing
 
 First make a directory and clone the repo
 ```
-cd ./github
-git clone https://github.com/Filo01/Hanashi.git
+$ cd ./github
+$ git clone https://github.com/Filo01/Hanashi.git
 ```
 
 Use venv and use setup.py
@@ -37,6 +37,17 @@ Use venv and use setup.py
 python setup.py install
 ```
 
+## Running Tests
+
+To run all tests
+```
+$ python -m unittest
+```
+
+To run specific tests
+```
+$ python -m unittest tests.<module_name>
+```
 
 ## License
 
