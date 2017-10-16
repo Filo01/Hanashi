@@ -12,11 +12,7 @@ import pytesseract
 from import hanashi.processor import page_processor
 
 masks, lines, rectangles = page_processor.process(filename)
-lines = []
-for mask in masks:
-    s = (pytesseract.image_to_string(mask[2])).strip()
-    if s != "":
-        lines.append(s)
-
-    print("\n----\n".join(lines))
+results = page_processor.extract_text(masks)
+blocks_of_text = [result[0] for result in results]
+print("\n----\n".join(blocks_of_text))
 ```
