@@ -89,6 +89,7 @@ class Rectangle(object):
         x_overlap = max(0, min(self.r_top.x, item.r_top.x) - max(self.l_bot.x, item.l_bot.x))
         y_overlap = max(0, min(self.l_bot.y, item.l_bot.y) - max(self.l_top.y, item.l_top.y))
         overlap_area = (float)(x_overlap * y_overlap)
+
         # print "overlap_area " + str(overlap_area) + " area " + str(self.area())
         percentage = (overlap_area / self.area()) * 100
         return percentage

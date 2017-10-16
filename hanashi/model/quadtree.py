@@ -1,6 +1,6 @@
 from hanashi.model.rectangle import Rectangle
 
-MAX_OBJECTS = 10
+MAX_OBJECTS = 15
 MAX_LEVELS = 5
 
 

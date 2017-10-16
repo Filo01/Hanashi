@@ -4,15 +4,15 @@ This module extracts text from manga images.
 
 import cv2
 import logging
-import random
-from itertools import product
-
+import pytesseract
+import math
+import cProfile, pstats
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
-from PIL import ImageOps
+from PIL import Image, ImageDraw
 
 from hanashi.model.rectangle import Rectangle
 from hanashi.model.ufarray import UFarray
+from hanashi.model.quadtree import Quadtree
 
 logger = logging.getLogger("CCL")
 logger.setLevel(logging.INFO)
@@ -36,118 +36,67 @@ def crop_size(verts):
     return x_max, x_min, y_max, y_min
 
 
-def make_component_dict(labels, uf_arr, use_colors=False):
-    components = {}
-    colors = {}
-
-    for coords, label in labels.items():
-        # Name of the component the current point belongs to
-        component = uf_arr.find(label)
-
-        # Update the labels with correct information
-        # labels[(x, y)] = temp
-        components_list = components.get(component, [])
-        components_list.append(coords)
-        components[component] = components_list
-
-        # Colorize the image
-        if use_colors:
-            colors[component] = (random.randint(0, 255),
-                                 random.randint(0, 255),
-                                 random.randint(0, 255))
-
-    return components
+def show(img):
+    cv2.imshow('image', img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
-def threshold_components(original_components, min_threshold=None, max_threshold=None):
-    components = dict()
+def cv2_connected_components(img1, min_size=50, max_size=100000, show_image=False):
 
-    for label, points in original_components.items():
-        if min_threshold and len(points) > min_threshold:
-            components[label] = points
-        elif max_threshold and len(points) < max_threshold:
-            components[label] = points
-        elif min_threshold is None and max_threshold is None:
-            components[label] = points
+    img1 = cv2.bitwise_not(img1)
+    labelnum, labels, stats, centroids = cv2.connectedComponentsWithStats(img1)
 
-    return components
+    height, width = img1.shape
+    rect_image = np.zeros((height,width,3), np.uint8)
+    rectangles = []
+
+    for label in range(1, labelnum):
+        x1, y1 = centroids[label]
+        img = cv2.circle(rect_image, (int(x1), int(y1)), 1, (0, 0, 255), -1)
+
+        x, y, w, h, size = stats[label]
+        rect = Rectangle(x,y,w,h)
+
+        if min_size < rect.area() < max_size:
+            rectangles.append(rect)
+            img = cv2.rectangle(rect_image, (x, y), (x+w, y+h), (255, 255, 0), 1)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            bottomLeftCornerOfText = (int(x1), int(y1))
+            fontScale = 0.4
+            fontColor = (255, 255, 255)
+
+            cv2.putText(img, str(rect.area()),
+                        bottomLeftCornerOfText,
+                        font,
+                        fontScale,
+                        fontColor)
+    if show_image:
+        show(img)
+    return rectangles
 
 
-def connected_components(img, use_colors=False):
-    """
-    Finds all the black objects in an image and
-    returns them in a dict. The dict has int keys
-    for each component and a list of coordinates that belong to it
-    :param img:
-    :type img: PIL.Image
-    :param use_colors: draw and show an image with the different
-                    black components colored in different ways
-    :type use_colors: bool
-    :return: returns black components
-    :rtype: dict[int,list]
-    """
-    data = img.load()
-    width, height = img.size
+def adaptive_segmentation(cv2_img):
+    segmentation_levels = []
+    resize_factor = 1
+    cv2_img = cv2.resize(cv2_img, (0, 0), fx=resize_factor, fy=resize_factor, interpolation=cv2.INTER_LINEAR)
+    min_size = 10
+    max_size = 100000
+    resize_factor *= resize_factor
+    min_size *= resize_factor
+    max_size *= resize_factor
+    prev_len = float("inf")
+    for level in range(150, 250, 10):
+        thresholded = threshold_image(cv2_img, level)
+        rectangles = cv2_connected_components(thresholded, min_size, max_size)
+        segmentation_levels.append((level, rectangles))
+        n_rectangles = len(rectangles)
+        if n_rectangles < prev_len:
+            prev_len = n_rectangles
+        else:
+            break
 
-    black_uf = UFarray()
-
-    # Dictionary of point:label pairs
-    black_labels = {}
-
-    for y, x in product(range(height), range(width)):
-
-        pixel = data[x, y]
-
-        if pixel == 0:
-            if y > 0 and data[x, y - 1] == 0:
-                black_labels[x, y] = black_labels[(x, y - 1)]
-
-            elif x + 1 < width and y > 0 and data[x + 1, y - 1] == 0:
-
-                c = black_labels[(x + 1, y - 1)]
-                black_labels[x, y] = c
-
-                if x > 0 and data[x - 1, y - 1] == 0:
-                    a = black_labels[(x - 1, y - 1)]
-                    black_uf.union(c, a)
-
-                elif x > 0 and data[x - 1, y] == 0:
-                    d = black_labels[(x - 1, y)]
-                    black_uf.union(c, d)
-
-            elif x > 0 and y > 0 and data[x - 1, y - 1] == 0:
-                black_labels[x, y] = black_labels[(x - 1, y - 1)]
-
-            elif x > 0 and data[x - 1, y] == 0:
-                black_labels[x, y] = black_labels[(x - 1, y)]
-
-            else:
-                black_labels[x, y] = black_uf.makeLabel()
-
-    black_uf.flatten()
-    black_temp = make_component_dict(black_labels, black_uf)
-
-    max_threshold = width*height/15
-    black_components = threshold_components(black_temp, max_threshold=max_threshold)
-
-    for label in list(black_components.keys()):
-        if len(black_components[label]) < 50:
-            del black_components[label]
-
-    if use_colors:
-        """
-        output_img = Image.new("RGB", (width, height))
-        out_data = output_img.load()
-        for component in black_components:
-            for (x, y) in black_components[component]:
-                if component in black_colors:
-                    out_data[x, y] = black_colors[component]
-        output_img.show()
-        """
-        pass
-
-    return black_components
-
+    return rectangles
 
 def threshold_image(img, level):
     """
@@ -155,20 +104,18 @@ def threshold_image(img, level):
     :param img:
     :param level:
     :return: the resulting image
-    :rtype: PIL.Image
+    :rtype: cv2 image
     """
-    img1 = Image.new("RGB", img.size)
-    img1.paste(img)
-    img1 = img1.point(lambda p: p > level and 255)
-    img1 = img1.convert('1')
+    blur = cv2.GaussianBlur(img, (5, 5), 0)
+    _, dst = cv2.threshold(blur, level, 255, cv2.THRESH_BINARY)
 
-    return img1
+    return dst
 
 
-def adaptive_threshold(filename):
+def adaptive_threshold(image):
     """
     Calculate the threshold
-    :param filename: the filename of the image
+    :param image: the cv2 image
     :return: threshold level
     :rtype: int
     """
@@ -207,24 +154,32 @@ def third_pass(rectangles):
     return possible_letters
 
 
-def is_first_letter(rect, rectangles):
-    left_rec = Rectangle(rect.x - rect.height * 0.8,
+def is_first_letter(rect, quadtree, draw = None):
+    left_rec = Rectangle(rect.x - rect.height,
                          rect.y, rect.height, rect.height)
-    is_first = True
-    for rect1 in rectangles:
+    if draw:
+        left_rec.draw(draw, outline="yellow")
+    neighbours = []
+    quadtree.retrieve(neighbours, rect)
+    for rect1 in neighbours:
         if rect1 is not rect and rect1.overlaps_with(left_rec):
-            is_first = False
-            break
-    return is_first
+            return False
+    return True
 
 
-def remove_overlappings(rectangles):
+def remove_overlaps(rectangles, width, height):
     remove = []
     i = 0
+    quadtree = Quadtree(0, Rectangle(0, 0, width, height))
     for rect in rectangles:
-        for rect1 in rectangles:
-            if rect.overlap_percentage(rect1) > 30 or rect.height < 5 or rect.width < 5:
-                remove.append(rect)
+        quadtree.insert(rect)
+    for rect in rectangles:
+        neighbours = []
+        quadtree.retrieve(neighbours, rect)
+        for rect1 in neighbours:
+            percentage = rect.overlap_percentage(rect1)
+            if percentage == 100:
+                remove.append(rect1)
                 i += 1
     for rect in rectangles[:]:
         if rect in remove:
@@ -233,7 +188,7 @@ def remove_overlappings(rectangles):
     return rectangles
 
 
-def get_lines(rectangles):
+def get_lines(rectangles, width, height):
     """
     Finds all rectangles that are aligned with each other
     and have similar height and groups them
@@ -242,24 +197,29 @@ def get_lines(rectangles):
     :return: groups of rectangles
     :rtype: dict[int, list]
     """
-    rectangles.sort(key=lambda rec: rec.x)
     n = 0
     lines = dict()
+    quadtree = Quadtree(0, Rectangle(0,0,width, height))
     for rect in rectangles:
-        if is_first_letter(rect, rectangles):
+        quadtree.insert(rect)
+    for rect in rectangles:
+        is_first = is_first_letter(rect, quadtree)
+        if is_first:
 
             last_rect = rect
             lines[n] = list()
             lines[n].append(last_rect)
-            for rect1 in rectangles:
+            neighbours = []
+            quadtree.retrieve(neighbours, rect)
+            for rect1 in sorted(neighbours, key=lambda rec: rec.x):
                 right_last_rect = Rectangle(last_rect.x + last_rect.width,
                                             last_rect.y, last_rect.height * 1.5,
                                             last_rect.height)
 
                 if rect is not rect1 and \
                         rect.inline(rect1) and \
-                        right_last_rect.intersects(rect1):  # and \
-                    # math.sqrt(math.pow(r.height-o.height, 2)) < 0.5*r.height:
+                        right_last_rect.intersects(rect1) and \
+                        math.sqrt(pow(rect.height-rect1.height, 2)) < 0.5*rect.height:
                     last_rect = rect1
                     lines[n].append(last_rect)
 
@@ -321,22 +281,6 @@ def group_lines(lines):
     return groups
 
 
-def white_percent(img, img2):
-    img2 = img2.convert('L')
-    inverted_poly = ImageOps.invert(img2)
-    img1 = img.copy()
-    img1.paste(inverted_poly, (0, 0), mask=inverted_poly)
-
-    white = 0
-    for pixel in img1.getdata():
-        if pixel == (255, 255, 255):
-            white += 1
-
-    width, height = img.size
-    area = float(width * height)
-    return white / area * 100.0
-
-
 def crop_size_rectangles(rectangles):
     (x_max, x_min, y_max, y_min) = (0, float("inf"), 0, float("inf"))
     for rect in rectangles:
@@ -370,8 +314,9 @@ def mask_groups(img, groups):
             draw = ImageDraw.Draw(masked_img)
             (x_max, x_min, y_max, y_min) = crop_size_rectangles(groups[label])
             bounding_box = Rectangle(x_min, y_min, x_max - x_min, y_max - y_min)
-            for rect in groups[label]:
-                rect.draw(draw, fill=True)
+            bounding_box.draw(draw, fill=True)
+            #for rect in groups[label]:
+            #    rect.draw(draw, fill=True)
             temp_img = img.copy()
             temp_img.paste(masked_img, mask=masked_img)
             temp_img = temp_img.crop((bounding_box.x, bounding_box.y,
@@ -402,35 +347,15 @@ def mask_img(img, masks):
     return line_masks
 
 
-def compare_image(original, masks):
-    original = original.copy()
-    original = original.resize([int(2 * s) for s in original.size], Image.ANTIALIAS)
+def compare_image(filename, masks):
+    original = Image.open(filename)
+    #original = original.resize([int(2 * s) for s in original.size], Image.ANTIALIAS)
     img3 = Image.new("RGB", (original.size[0] * 2, original.size[1]))
     img3.paste(original, box=(original.width, 0))
     for mask in masks:
         img3.paste(mask[2], box=(mask[0], mask[1]))
-    img3 = img3.resize([int(0.5 * s) for s in img3.size], Image.ANTIALIAS)
+    #img3 = img3.resize([int(0.5 * s) for s in img3.size], Image.ANTIALIAS)
     return img3
-
-
-def generate_rectangles(components):
-    """
-    Calculates the bounding box of each component
-    :param components:
-    :type components: dict[int, list]
-    :return:
-    :rtype: list[Rectangle]
-    """
-    rectangles = []
-    for component in components:
-        (x_max, x_min, y_max, y_min) = crop_size(components[component])
-        try:
-            rect = Rectangle(x_min, y_min, x_max - x_min, y_max - y_min,
-                             points=components[component], label=component)
-        except AssertionError:
-            continue
-        rectangles.append(rect)
-    return rectangles
 
 
 def process(filename):
@@ -441,20 +366,27 @@ def process(filename):
     :rtype: list
     """
     img = Image.open(filename)
-    img = img.resize([int(2 * s) for s in img.size], Image.ANTIALIAS)
-    threshold = adaptive_threshold(filename)
-    threshold_img = threshold_image(img.filter(ImageFilter.BLUR), threshold)
-    black_components = connected_components(threshold_img)
-    logger.debug("Removing uninteresting objects")
-    rectangles = generate_rectangles(black_components)
+    cv2_img = cv2.imread(filename,0)
+    width, height = img.size
+
+    rectangles = adaptive_segmentation(cv2_img)
+    rectangles = remove_overlaps(rectangles, width, height)
     logger.debug("Getting Lines")
-    lines = get_lines(rectangles)
+    lines = get_lines(rectangles, width, height)
     groups = group_lines(lines)
     logger.debug("Applying mask")
     masks = mask_groups(img, groups)
-    return masks
+    return masks, lines, rectangles
 
+
+def extract_text(masks):
+    result = []
+    for mask in masks:
+        s = (pytesseract.image_to_string(mask[2])).strip()
+        if s != "":
+            result.append((s, mask))
+
+    return result
 
 if __name__ == "__main__":
-
     pass
