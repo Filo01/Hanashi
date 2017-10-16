@@ -1,0 +1,8 @@
+unittest2
+pillow
+numpy
+opencv-python
+requests
+beautifulsoup4
+pytesseract
+begins
