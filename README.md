@@ -7,7 +7,7 @@ OCR is done by tesseract.
 ## Code Example
 
 
-```
+```python
 import pytesseract
 from import hanashi.processor import page_processor
 
