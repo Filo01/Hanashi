@@ -1,19 +1,23 @@
 import cv2
+
 import os
 import unittest
 
 import hanashi.processor.page_processor as processor
+import hanashi.processor.image_helper as img_helper
 
 
 def test_image(filename, expected_filename):
     masks, lines, rectangles = processor.process(filename)
-    result = processor.extract_text(masks)
-    masks = [res[1] for res in result]
+    text, masks = processor.extract_text(masks)
     img = cv2.imread(filename, 0)
     final = processor.apply_masks(img, masks)
     expected = cv2.imread(expected_filename, 0)
-    error_percentage = processor.compare_image(expected, final)
-    return error_percentage, len(masks)
+
+    mse, ssim = img_helper.compare_images(cv2.imread(filename,0), expected)
+    mse1, ssim1 = img_helper.compare_images(final, expected)
+    mse_percentage = mse1 / mse *100
+    return mse_percentage, len(masks)
 
 
 class PageProcessorTest(unittest.TestCase):
@@ -24,7 +28,7 @@ class PageProcessorTest(unittest.TestCase):
         expected_mask_number = 6
         error_percentage, mask_number = test_image(filename, expected_filename)
         self.assertAlmostEqual(mask_number, expected_mask_number, delta=3)
-        self.assertAlmostEqual(error_percentage, 0, delta=20)
+        self.assertAlmostEqual(error_percentage, 0, delta=1)
 
     def test_onepiece(self):
         filename = os.path.join(os.path.dirname(__file__), 'resources/onepiece.jpg')
@@ -32,7 +36,7 @@ class PageProcessorTest(unittest.TestCase):
         expected_mask_number = 10
         error_percentage, mask_number = test_image(filename, expected_filename)
         self.assertAlmostEqual(mask_number, expected_mask_number, delta=3)
-        self.assertAlmostEqual(error_percentage, 0, delta=20)
+        self.assertAlmostEqual(error_percentage, 0, delta=1)
 
     def test_image(self):
         filename = os.path.join(os.path.dirname(__file__), 'resources/image.jpg')
@@ -40,4 +44,4 @@ class PageProcessorTest(unittest.TestCase):
         expected_mask_number = 15
         error_percentage, mask_number = test_image(filename, expected_filename)
         self.assertAlmostEqual(mask_number, expected_mask_number, delta=3)
-        self.assertAlmostEqual(error_percentage, 0, delta=20)
+        self.assertAlmostEqual(error_percentage, 0, delta=1)

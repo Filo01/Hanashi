@@ -6,12 +6,14 @@ import cv2
 import logging
 import pytesseract
 import math
+import random
 import numpy as np
 from PIL import Image, ImageDraw
 
 from hanashi.model.rectangle import Rectangle
 from hanashi.model.ufarray import UFarray
 from hanashi.model.quadtree import Quadtree
+from hanashi.model.contour_tree import Tree, Node
 
 logger = logging.getLogger("CCL")
 logger.setLevel(logging.INFO)
@@ -41,39 +43,79 @@ def show(img):
     cv2.destroyAllWindows()
 
 
-def cv2_connected_components(img1, min_size=50, max_size=100000, show_image=False):
-
+def cv2_connected_components(img1, min_size=50, max_size=100000):
     img1 = cv2.bitwise_not(img1)
     labelnum, labels, stats, centroids = cv2.connectedComponentsWithStats(img1)
 
-    height, width = img1.shape
-    rect_image = np.zeros((height,width,3), np.uint8)
     rectangles = []
 
     for label in range(1, labelnum):
-        x1, y1 = centroids[label]
-        img = cv2.circle(rect_image, (int(x1), int(y1)), 1, (0, 0, 255), -1)
 
         x, y, w, h, size = stats[label]
         rect = Rectangle(x,y,w,h)
 
         if min_size < rect.area() < max_size:
             rectangles.append(rect)
-            img = cv2.rectangle(rect_image, (x, y), (x+w, y+h), (255, 255, 0), 1)
+
+
+    return labelnum, labels, rectangles
+
+
+def find_bubbles(labelnum, labels, rectangles, img, show_image=False):
+    height, width = img.shape
+    colors = dict()
+    colors[0] = 0
+    for label in range(1, labelnum):
+        labels[labels == label] = random.randint(0, 255)
+    labels = labels.astype(np.uint8)
+    img1 = cv2.bitwise_not(img)
+
+    _, contours, hierarchy = cv2.findContours(
+        img1, cv2.cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    n = 0
+    area = float(labels.shape[0] * labels.shape[1])
+    medium_tree = Tree()
+    large_tree = Tree()
+    for elem in hierarchy[0]:
+        contour = contours[n]
+        x, y, w, h = cv2.boundingRect(contour)
+        bounding_box = Rectangle(x, y, w, h)
+        box_area = bounding_box.area()
+        node = Node(elem[3], n, contour, bounding_box)
+        if box_area > area / 10:
+            large_tree.add(node)
+        elif box_area > area / 1000:
+            medium_tree.add(node)
+        n += 1
+
+    possible_bubbles = [(node, level)
+                        for node, level in
+                        medium_tree.level_order_traversal()]
+    img2 = np.zeros((height, width, 3), np.uint8)
+
+    if show_image:
+        for node, level1 in medium_tree.level_order_traversal():
+            if node.n != -1:
+                cv2.drawContours(img2, contours, node.n,
+                                 (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)), -1)
+
+        for rect in rectangles:
+            print("Drawing ", rect)
+            img2 = cv2.rectangle(img2, (rect.x, rect.y), (rect.r_bot.x, rect.r_bot.y), (255, 255, 0), 1)
+
+            """
             font = cv2.FONT_HERSHEY_SIMPLEX
-            bottomLeftCornerOfText = (int(x1), int(y1))
+            bottomLeftCornerOfText = (rect.l_bot.x, rect.l_bot.y)
             fontScale = 0.4
             fontColor = (255, 255, 255)
-
-            cv2.putText(img, str(rect.area()),
+            cv2.putText(img2, str(rect.area()),
                         bottomLeftCornerOfText,
                         font,
                         fontScale,
                         fontColor)
-    if show_image:
-        show(img)
-    return rectangles
-
+            """
+        show(img2)
+    return possible_bubbles
 
 def adaptive_segmentation(cv2_img):
     segmentation_levels = []
@@ -85,17 +127,46 @@ def adaptive_segmentation(cv2_img):
     min_size *= resize_factor
     max_size *= resize_factor
     prev_len = float("inf")
-    for level in range(150, 250, 10):
-        thresholded = threshold_image(cv2_img, level)
-        rectangles = cv2_connected_components(thresholded, min_size, max_size)
+    mean = int(cv2.mean(cv2_img)[0])
+    height, width = cv2_img.shape
+    for level in range(mean, 230, 5):
+        thresholded = threshold_image(cv2_img.copy(), level)
+        labelnum, labels, rectangles = cv2_connected_components(thresholded, min_size, max_size)
+        #possible_bubbles = merge_bubbles(possible_bubbles)
         segmentation_levels.append((level, rectangles))
         n_rectangles = len(rectangles)
         if n_rectangles < prev_len:
             prev_len = n_rectangles
         else:
             break
+    possible_bubbles = find_bubbles(labelnum, labels, rectangles, thresholded)
+    rectangles = overlaps(rectangles, possible_bubbles, width, height)
 
-    return rectangles
+    return rectangles, possible_bubbles, thresholded
+
+
+def iterate_rectangles(rectangles1, rectangles2, width, height):
+    quadtree = Quadtree(0, Rectangle(0, 0, width, height))
+    for rect in rectangles2:
+        if rect:
+            quadtree.insert(rect)
+    for rect in rectangles1:
+        neighbours = []
+        quadtree.retrieve(neighbours, rect)
+        for rect1 in neighbours:
+            yield rect, rect1
+
+
+def merge_bubbles(bubbles, width, height):
+    pass
+
+def overlaps(rectangles, possible_bubbles, width, height):
+    bubbles = [bubble[0].box for bubble in possible_bubbles]
+    rectangles2 = [rect for rect, bubble in
+                   iterate_rectangles(rectangles, bubbles, width, height)
+                   if rect in bubble]
+    return rectangles2
+
 
 def threshold_image(img, level):
     """
@@ -118,9 +189,8 @@ def adaptive_threshold(image):
     :return: threshold level
     :rtype: int
     """
-    img = cv2.imread(filename, 0)
 
-    mean = np.mean(img)
+    mean = np.mean(image)
     if 100 > mean > 230:
         mean = mean + mean * 0.2
 
@@ -169,17 +239,11 @@ def is_first_letter(rect, quadtree, draw = None):
 def remove_overlaps(rectangles, width, height):
     remove = []
     i = 0
-    quadtree = Quadtree(0, Rectangle(0, 0, width, height))
-    for rect in rectangles:
-        quadtree.insert(rect)
-    for rect in rectangles:
-        neighbours = []
-        quadtree.retrieve(neighbours, rect)
-        for rect1 in neighbours:
-            percentage = rect.overlap_percentage(rect1)
-            if percentage == 100:
-                remove.append(rect1)
-                i += 1
+    for rect, rect1 in iterate_rectangles(rectangles, rectangles, width, height):
+        percentage = rect.overlap_percentage(rect1)
+        if percentage == 100:
+            remove.append(rect1)
+            i += 1
     for rect in rectangles[:]:
         if rect in remove:
             rectangles.remove(rect)
@@ -290,7 +354,7 @@ def crop_size_rectangles(rectangles):
     return x_max, x_min, y_max, y_min
 
 
-def mask_groups(img, groups):
+def mask_groups(img, groups, possible_bubbles):
     """
     Returns list of masked images
     :param img: image to mask
@@ -298,31 +362,55 @@ def mask_groups(img, groups):
     :param groups: group of rectangles to use as masks
     :return: list of masked images and their
     top left corner position on the original image
-    :rtype: list[int, int, Image, list[Rectangles]]
+    :rtype: list[int, int, Image, Rectangle, list[Rectangles], list[Rectangle]]
 
     """
     masks = []
-
+    width, height = img.size
+    used_bubbles = []
     for label in groups:
-        line_length = len(groups[label])
+        lines = groups[label]
+        (x_max, x_min, y_max, y_min) = crop_size_rectangles(groups[label])
+        bounding_box = Rectangle(x_min, y_min, x_max - x_min, y_max - y_min)
+        line_length = len(lines)
+        if line_length <= 1:
+            continue
+        """
         if line_length > 1 or \
                 (line_length == 1 and
-                    groups[label][0].width/groups[label][0].height > 2 and
-                    groups[label][0].width * groups[label][0].height > 500):
-            masked_img = Image.new("L", img.size, color=255)
+                    lines[0].width/lines[0].height > 2 and
+                    lines[0].width * lines[0].height > 500):
+        """
+        highest_level = 0
+        index = -1
+        for i, bubble in enumerate(possible_bubbles):
+            if i != 0 and \
+                    bounding_box in bubble[0].box:
+                if i in used_bubbles:
+                    break
+                if highest_level < bubble[1]:
+                    highest_level=bubble[1]
+                    index = i
+        if index > 0 and index not in used_bubbles:
+            used_bubbles.append(index)
+            bubble = possible_bubbles[index][0]
+            cv2_img = np.full((height, width), 255, dtype=np.uint8)
+            cv2.drawContours(cv2_img, [bubble.contour], 0, 0, -1)
+
+            masked_img = Image.fromarray(cv2_img)
             draw = ImageDraw.Draw(masked_img)
-            (x_max, x_min, y_max, y_min) = crop_size_rectangles(groups[label])
-            bounding_box = Rectangle(x_min, y_min, x_max - x_min, y_max - y_min)
-            bounding_box.draw(draw, fill=True)
-            #for rect in groups[label]:
-            #    rect.draw(draw, fill=True)
+
+            for rect in lines:
+                rect.draw(draw, fill=True)
             temp_img = img.copy()
             temp_img.paste(masked_img, mask=masked_img)
+            bounding_box = bubble.box
             temp_img = temp_img.crop((bounding_box.x, bounding_box.y,
                                       bounding_box.x + bounding_box.width,
                                       bounding_box.y + bounding_box.height))
+            masks.append((bounding_box.x, bounding_box.y, temp_img, bounding_box, lines, bubble))
 
-            masks.append((bounding_box.x, bounding_box.y, temp_img, bounding_box))
+            continue
 
     return masks
 
@@ -349,7 +437,7 @@ def mask_img(img, masks):
 def compare_with_original(filename, masks):
     original = Image.open(filename)
     #original = original.resize([int(2 * s) for s in original.size], Image.ANTIALIAS)
-    img3 = Image.new("RGB", (original.size[0] * 2, original.size[1]))
+    img3 = Image.new("RGB", (original.size[0] * 2, original.size[1]), color="white")
     img3.paste(original, box=(original.width, 0))
     for mask in masks:
         img3.paste(mask[2], box=(mask[0], mask[1]))
@@ -361,10 +449,12 @@ def apply_masks(original, masks):
 
     masked = np.zeros(original.shape, dtype=np.uint8)
     for mask in masks:
-        cv2.rectangle(masked,
-                      (mask[3].l_top.x, mask[3].l_top.y),
-                      (mask[3].r_bot.x, mask[3].r_bot.y),
-                      255, thickness=cv2.FILLED)
+        cv2.drawContours(masked,[mask[5].contour],0, 255, -1)
+        for line in mask[4]:
+            cv2.rectangle(masked,
+                          (line.l_top.x, line.l_top.y),
+                          (line.r_bot.x, line.r_bot.y),
+                          255, thickness=cv2.FILLED)
     fg_masked = cv2.bitwise_or(original, original, mask=masked)
     masked = cv2.bitwise_not(masked)
     bk = np.full(original.shape, 255, dtype=np.uint8)
@@ -393,25 +483,46 @@ def process(filename):
     cv2_img = cv2.imread(filename,0)
     width, height = img.size
 
-    rectangles = adaptive_segmentation(cv2_img)
-    rectangles = remove_overlaps(rectangles, width, height)
+    rectangles, possible_bubbles = adaptive_segmentation(cv2_img)
+    #rectangles = remove_overlaps(rectangles, width, height)
     logger.debug("Getting Lines")
     lines = get_lines(rectangles, width, height)
     groups = group_lines(lines)
     logger.debug("Applying mask")
-    masks = mask_groups(img, groups)
+    masks = mask_groups(img, groups, possible_bubbles)
     return masks, lines, rectangles
 
 
 def extract_text(masks):
-    result = []
+    resize_factor = 2.5
+    if not masks:
+        return "", []
+    width = max([int(mask[2].size[0]*resize_factor) for mask in masks])
+    height = sum([int(mask[2].size[1]*resize_factor) for mask in masks])
+    image = Image.new("RGB", (width, height))
+    height = 0
+    masks1 = []
+    text = []
     for mask in masks:
-        image = mask[2].resize([int(n*2.5) for n in mask[2].size], Image.ANTIALIAS)
-        s = (pytesseract.image_to_string(image)).strip()
+        resized = mask[2].resize([int(n*resize_factor) for n in mask[2].size], Image.ANTIALIAS)
+        s = (pytesseract.image_to_string(resized)).strip()
         if s != "":
-            result.append((s, mask))
+            masks1.append(mask)
+            text.append(s)
+        """
+        box = masked_img.size
+        x = int(width/2 - box[0]/2)
+        y = height
+        image.paste(masked_img, box=(x,y))
+        height += box[1]
+        """
 
-    return result
+    return text, masks1
+
 
 if __name__ == "__main__":
+    filename = "/media/filippo/HDD1/pythonProjects/Github-Hanashi/Hanashi/Hanashi/tests/resources/onepunch.jpg"
+
+    img = cv2.imread(filename,0)
+
     pass
